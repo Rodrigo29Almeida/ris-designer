@@ -31,8 +31,9 @@ PASTA_VAL = os.path.join(PASTA_ESTUDO_ER, "Validacao_CST")            # projetos
 C0 = 299792458.0
 ETA0 = 376.730313
 EPS = np.finfo(float).eps
-NB_LIST = [0, 1, 2, 3, 4]       # 0 = contínuo; 1..4 bits
-CASO_CST = 0                    # caso do "Run CST Simulation" (índice 0 = contínuo)
+NB_LIST = [1, 2, 3, 4, 0]       # ordem dos casos em toda a app: 1..4 bits e, por fim, o contínuo (0)
+I_CONT = NB_LIST.index(0)       # índice do contínuo (referência das normalizações)
+CASO_CST = I_CONT               # caso mostrado na consola
 TGND_MM = 1.0                   # espessura do plano de massa [mm]
 TAND = 0.0                      # tanδ usada na simulação da célula unitária
 
@@ -309,7 +310,7 @@ def calcular(p: Params, pasta_phase: str = PASTA_PHASE) -> Resultado:
     vF = sind(p.El_r) * np.ones_like(angF)
     feF = np.maximum(cosd(p.El_r) * cosd(angF), 1e-6)
     CUT = [np.abs(soma_array(r.fase, r.amp, II, JJ, p.Px, p.Py, k, uF, vF, ui, vi)) * feF for r in res]
-    refC = float(CUT[0].max())
+    refC = float(CUT[I_CONT].max())                # normalizado ao contínuo
 
     iObj = int(np.argmin(np.abs(angF - p.Az_r)))
     iEsp = int(np.argmin(np.abs(angF - az_s)))
@@ -326,7 +327,7 @@ def calcular(p: Params, pasta_phase: str = PASTA_PHASE) -> Resultado:
     U = cosd(EL) * sind(AZ); V = sind(EL)
     FE = np.maximum(cosd(EL) * cosd(AZ), 1e-6)
     MAP = [np.abs(soma_array(r.fase, r.amp, II, JJ, p.Px, p.Py, k, U, V, ui, vi)) * FE for r in res]
-    ref2 = float(MAP[0].max())
+    ref2 = float(MAP[I_CONT].max())
 
     # ---- impedâncias de superfície (modelo CST)
     erC = cv.er
