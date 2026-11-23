@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Projetos e resultados do CST (pesados; gerados pela app)
+Estudo_Er/
+*.cst
+*.mat
+*.cst_lock
+*.lok
+
+# Editores / sistema
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Configuração local do Claude Code
+.claude/settings.local.json
