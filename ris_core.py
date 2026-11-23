@@ -404,6 +404,22 @@ def ler_mats(assin: str, nomes, pasta: str = PASTA_VAL, prefixo: str = PREF_IBC)
     return out
 
 
+def tempos_historicos(M: int, N: int, prefixo: str = PREF_IBC, pasta: str = None) -> list:
+    """Durações [s] de simulações anteriores (não as leituras de projetos existentes) com o mesmo M x N,
+    a partir dos .mat gravados. Servem para estimar o tempo de espera."""
+    import scipy.io as sio
+    pasta = pasta or PASTA_VAL
+    out = []
+    for fm in glob.glob(os.path.join(pasta, f"{prefixo}*_{int(M)}x{int(N)}_*.mat")):
+        try:
+            r = sio.loadmat(fm, squeeze_me=True, struct_as_record=False, variable_names=["reg"])["reg"]
+            if not bool(r.legado) and float(r.tempo) > 0:
+                out.append(float(r.tempo))
+        except Exception:
+            pass
+    return out
+
+
 def gravar_mat(v: ValCST, assin: str):
     """Grava <projeto>.mat ao lado do .cst, no mesmo formato da app MATLAB (struct 'reg')."""
     import scipy.io as sio

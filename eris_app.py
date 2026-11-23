@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import numpy as np
 import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QGroupBox, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton, QTabWidget,
@@ -136,6 +137,8 @@ def substituir(container_layout, novo):
 # ============================================================================ CST numa thread (COM)
 class TrabalhoCST(QThread):
     progresso = Signal(str)
+    inicioCaso = Signal(int)            # índice (0..n-1) do trabalho que começou
+    fimCaso = Signal(float, bool)       # duração [s], True = foi simulação (False = leitura de projeto)
     feito = Signal(list, list)          # [ValCST], [falhas]
 
     def __init__(self, R, jobs, assin, modelo="ibc"):
@@ -152,6 +155,8 @@ class TrabalhoCST(QThread):
             n = len(self.jobs)
             for k, (caso, fich, simular) in enumerate(self.jobs, start=1):
                 prog = (lambda t, k=k: self.progresso.emit(f"[{k}/{n}]  {t}")) if n > 1 else self.progresso.emit
+                self.inicioCaso.emit(k - 1)
+                t0 = time.time()
                 try:
                     if simular and self.modelo == "diel":
                         v = ris_cst.validar_dielectrico(self.R, caso, prog)
@@ -165,6 +170,7 @@ class TrabalhoCST(QThread):
                 except Exception as e:
                     print(f"» CST ({caso}) falhou: {e}", file=sys.stderr)
                     falhas.append(f"{caso}: {e}")
+                self.fimCaso.emit(time.time() - t0, bool(simular))
         finally:
             pythoncom.CoUninitialize()
         self.feito.emit(ok, falhas)
@@ -388,12 +394,67 @@ class App(QMainWindow):
         dlg = QProgressDialog("A ligar ao CST...", None, 0, 0, self)
         dlg.setWindowTitle("CST" if modelo == "ibc" else "Run CST Simulation (dielétrico real)")
         dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(0)
+        dlg.setMinimumWidth(560)
         dlg.show()
         self.worker = TrabalhoCST(self.R, jobs, self.assin, modelo)
-        self.worker.progresso.connect(dlg.setLabelText)
         mem = self.memCST if modelo == "ibc" else self.memDiel
 
+        # ---- relógio e estimativa do tempo que falta (atualizado 1x/s; não interfere com o CST)
+        # Estimativa por caso: média das durações já feitas nesta corrida; antes disso, média das
+        # simulações anteriores com o mesmo M x N (campo 'tempo' dos .mat). Leituras de projetos ~ rápidas.
+        prefixo = rc.PREF_IBC if modelo == "ibc" else rc.PREF_DIEL
+        hist = rc.tempos_historicos(self.R.p.M, self.R.p.N, prefixo)
+        est = {"msg": "A ligar ao CST...", "t0": time.time(), "tCaso": time.time(), "k": 0,
+               "sim": [], "ler": []}
+
+        def media(lst, reserva):
+            return sum(lst) / len(lst) if lst else reserva
+
+        def mmss(s):
+            s = int(round(s)); h, r = divmod(s, 3600); m, s = divmod(r, 60)
+            return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+        def atualizar():
+            agora = time.time()
+            dC, dT = agora - est["tCaso"], agora - est["t0"]
+            eSim = media(est["sim"], media(hist, None))
+            eLer = media(est["ler"], 30.0)
+            linhas = [est["msg"], "",
+                      f"Decorrido:  {mmss(dC)} neste caso   ·   {mmss(dT)} no total"]
+            k = est["k"]
+            if k < len(jobs):
+                restantes = jobs[k + 1:]
+                atual = eSim if jobs[k][2] else eLer
+                if atual is None or (any(j[2] for j in restantes) and eSim is None):
+                    linhas.append("Tempo restante: sem estimativa até terminar o 1.º caso simulado")
+                else:
+                    falta = max(atual - dC, 0) + sum(eSim if j[2] else eLer for j in restantes)
+                    base = "desta corrida" if est["sim"] else f"{len(hist)} simulação(ões) anteriores"
+                    txt = f"Tempo restante estimado:  ~{mmss(falta)}   (média por caso: {mmss(atual)}, {base})"
+                    if dC > atual:
+                        txt += "\nEste caso já demora mais do que a média…"
+                    linhas.append(txt)
+            dlg.setLabelText("\n".join(linhas))
+
+        def novo_msg(t):
+            est["msg"] = t; atualizar()
+
+        def inicio(k):
+            est["k"] = k; est["tCaso"] = time.time(); atualizar()
+
+        def fim_caso(dur, simulou):
+            est["sim" if simulou else "ler"].append(dur)
+
+        self.worker.progresso.connect(novo_msg)
+        self.worker.inicioCaso.connect(inicio)
+        self.worker.fimCaso.connect(fim_caso)
+        relogio = QTimer(dlg)
+        relogio.timeout.connect(atualizar)
+        relogio.start(1000)
+        atualizar()
+
         def fim(ok, falhas):
+            relogio.stop()
             dlg.close()
             for v in ok:
                 mem["val"][v.caso] = v
