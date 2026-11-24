@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QStackedWidget, QMessageBox, QProgressDialog, QSizePolicy, QAbstractItemView)
 
 import ris_core as rc
+import ris_cst          # o pywin32 só é carregado ao ligar ao CST
 
 CORES = [(0, 0, 0), (0.85, 0.33, 0.10), (0.00, 0.45, 0.74), (0.47, 0.67, 0.19), (0.49, 0.18, 0.56)]
 ESTILOS = ["-", "--", ":", "-.", "-"]
@@ -187,11 +188,10 @@ class App(QMainWindow):
         self.R = None
         self.usarDelta = True
         self.mostrarIdeal = False
-        self.fonteMapa = 0              # Mapa 2D: 0 = App (teoria), 1 = CST (IBC), 2 = CST (dielétrico)
+        self.fonteMapa = 0              # Mapa 2D: 0 = App (teoria), 1 = CST (dielétrico)
         self.normalizar = True          # True: dB relativos ao contínuo; False: valores originais
-        self.casoSelCST = None
         self.selInfo = self.selDiag = self.selMapa = None
-        self.memCST = {"assinatura": None, "val": {}}     # CST com impedância de superfície (Val_*)
+        self.memCST = {"assinatura": None, "val": {}}     # IBC (Val_*): já não aparece na interface
         self.memDiel = {"assinatura": None, "val": {}}    # CST com o dielétrico real (ValDiel_*)
         self.worker = None
 
@@ -216,8 +216,8 @@ class App(QMainWindow):
 
         self.M = campo(10, inteiro=True, mn=1, mx=200)
         self.N = campo(10, inteiro=True, mn=1, mx=200)
-        self.Lx = campo(0.025, 5, 0, 10)
-        self.Ly = campo(0.025, 5, 0, 10)
+        self.Lx = campo(0.03843, 5, 0, 10)
+        self.Ly = campo(0.03843, 5, 0, 10)
         self.Freq = campo(3.9, 4, 0, 1000)
         self.H = campo(1.524, 4, 0, 1000)
         self.Az_i = campo(0, 2, -90, 90); self.El_i = campo(0, 2, -90, 90)
@@ -240,10 +240,13 @@ class App(QMainWindow):
             G.addWidget(p, 0, 4 + col, 3, 1)
         self.cbCST = QCheckBox(" Run CST Simulation"); self.cbCST.setFont(QFont())
         self.cbCST.setToolTip("Com o Calculate: simula no CST a RIS com o dielétrico real (εr por célula, "
-                              "Frequency Domain solver) para todos os casos e compara com a teoria e o IBC")
+                              f"{ris_cst.nome_solver_diel()}) para o caso escolhido e compara com a teoria")
+        self.ddDiel = QComboBox(); self.ddDiel.addItems([rc.nome_caso(nb) for nb in rc.NB_LIST])
+        self.ddDiel.setCurrentText(rc.nome_caso(0))
+        self.ddDiel.setFont(QFont()); self.ddDiel.setToolTip("Caso simulado com o dielétrico real")
         self.btCalc = QPushButton("Calculate")
         self.btCalc.clicked.connect(lambda: self.calcular(None))
-        G.addWidget(self.cbCST, 3, 4)
+        G.addWidget(barra(self.cbCST, self.ddDiel, stretch_last=False), 3, 4)
         G.addWidget(self.btCalc, 3, 5)
         G.setColumnStretch(1, 1); G.setColumnStretch(3, 1)     # espaço extra vai para as caixas numéricas
         V.addWidget(gb)
@@ -269,6 +272,22 @@ class App(QMainWindow):
         self.gbRes.setFixedHeight(200)
         V.addWidget(self.gbRes)
 
+    # ------------------------------------------------------------------ fechar a janela
+    def closeEvent(self, ev):
+        """Com o CST a trabalhar, fechar a app perde os casos que faltam (a lista vive na app) e o campo
+        distante do caso atual não é lido. Pede confirmação."""
+        if self.worker is not None and self.worker.isRunning():
+            r = QMessageBox.warning(self, "CST ainda a trabalhar",
+                "O CST ainda está a simular. Se fechares a app agora:\n"
+                "  • o caso atual continua no CST, mas os resultados não são lidos para a app;\n"
+                "  • os casos seguintes NÃO são simulados.\n\n"
+                "(Depois podes voltar a correr o mesmo botão: os casos já feitos são reaproveitados.)\n\n"
+                "Fechar mesmo assim?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if r != QMessageBox.Yes:
+                ev.ignore()
+                return
+        ev.accept()
+
     # ------------------------------------------------------------------ parâmetros
     def params(self):
         return rc.Params(M=self.M.value(), N=self.N.value(), Px=self.Lx.value(), Py=self.Ly.value(),
@@ -278,7 +297,7 @@ class App(QMainWindow):
 
     # ------------------------------------------------------------------ cálculo (CalculateButtonPushed)
     def calcular(self, fonte=None):
-        """fonte: None (Calculate), 'btDelta', 'btValCST' ou 'btCarregarCST'."""
+        """fonte: None (Calculate) ou 'btDelta'."""
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "CST", "O CST ainda está a trabalhar; espera que termine.")
             return
@@ -299,98 +318,66 @@ class App(QMainWindow):
         if R.curva.aviso:
             QMessageBox.warning(self, "Curva para este ângulo em falta", R.curva.aviso)
 
-        # Resultados CST: só valem enquanto os parâmetros forem os mesmos
+        # Resultados CST (dielétrico real): só valem enquanto os parâmetros forem os mesmos
         self.assin = rc.assinatura(R.p, R.curva.ficheiro)
-        if self.memCST["assinatura"] != self.assin:
-            self.memCST = {"assinatura": self.assin, "val": {}}
-        self.memCST["val"].update(rc.ler_mats(self.assin, R.nomes))
         if self.memDiel["assinatura"] != self.assin:
             self.memDiel = {"assinatura": self.assin, "val": {}}
         self.memDiel["val"].update(rc.ler_mats(self.assin, R.nomes, prefixo=rc.PREF_DIEL))
-        if self.casoSelCST not in R.nomes:
-            self.casoSelCST = R.nomes[rc.I_CONT]
-
-        jobs = []
-        if fonte == "btValCST":
-            # Já simulado com as mesmas características? Usa esse em vez de criar um projeto novo
-            caso = self.casoSelCST
-            if caso in self.memCST["val"]:
-                existente, jaCarregado = self.memCST["val"][caso].ficheiro, True
-            else:
-                enc, _ = rc.procurar_projetos(R, self.memCST["val"])
-                existente, jaCarregado = dict(enc).get(caso), False
-            simular = True
-            if existente:
-                r = QMessageBox.question(self, "Simular no CST",
-                    f'Já existe uma simulação de "{caso}" com as mesmas características:\n'
-                    f'{os.path.basename(existente)}\n\nUsar essa (Sim) ou simular de novo (Não)?',
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-                simular = (r == QMessageBox.No)
-            if simular:
-                jobs.append((caso, "", True))
-            elif not jaCarregado:
-                jobs.append((caso, existente, False))       # lê o campo distante do projeto existente
-            else:
-                self.selDiag = caso                          # resultados já em memória: só mostra
-        elif fonte == "btCarregarCST":
-            enc, sem = rc.procurar_projetos(R, self.memCST["val"])
-            jobs += [(c, f, False) for c, f in enc]
-            if sem:
-                QMessageBox.information(self, "Carregar do CST",
-                    f"Não encontrei projeto CST compatível com os parâmetros atuais para: {', '.join(sem)}.\n\n"
-                    "Os projetos destes casos foram simulados com outra incidência, outra referência δ ou outra "
-                    "curva (ou não existem). Usa \"Simular no CST\".")
-            elif not jobs:
-                QMessageBox.information(self, "Carregar do CST", "Todos os casos com projeto CST já estão carregados.")
 
         self.renderizar()
 
-        if jobs:
-            self._correr_cst(jobs, selecionar=(fonte == "btValCST"))
-        elif fonte is None and self.cbCST.isChecked():
-            self._validar_diel()
+        # Resultados CST gravados antes da RCS (|E| em V/m): voltar a ler os projetos (sem simular)
+        antigos = {c: f for c, f in rc.mats_antigos(self.assin, R.nomes).items() if c not in self.memDiel["val"]}
+        if fonte is None and antigos:
+            r = QMessageBox.question(self, "Resultados CST em |E|",
+                "Estes resultados CST foram gravados como |E| em dB(V/m), antes de a app usar a RCS:\n  "
+                + "\n  ".join(f"{c}: {os.path.basename(f)}" for c, f in antigos.items())
+                + "\n\nLer de novo esses projetos no CST, agora em RCS [dB(mm²)]? "
+                  "(não volta a simular; os .mat antigos ficam guardados como *_Efield.mat)",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if r == QMessageBox.Yes:
+                if self.cbCST.isChecked():
+                    print('» "Run CST Simulation" fica para o próximo Calculate (primeiro a releitura em RCS).')
+                self._correr_cst([(c, f, False) for c, f in antigos.items()], selecionar=False, modelo="diel")
+                print("» Cálculo concluído.")
+                return
+
+        if fonte is None and self.cbCST.isChecked():
+            self._validar_diel(self.ddDiel.currentText())
         print("» Cálculo concluído.")
 
-    def _validar_diel(self):
-        """'Run CST Simulation': RIS com o dielétrico real no CST para TODOS os casos (1..4 bits e contínuo).
-        Casos já simulados com as mesmas características são reutilizados (por defeito) ou simulados de novo."""
+    def _validar_diel(self, caso):
+        """'Run CST Simulation': RIS com o dielétrico real no CST para o caso escolhido. Se já existir uma
+        simulação com as mesmas características, pergunta se a usa (por defeito) ou se simula de novo."""
         R = self.R
-        carregados = [c for c in R.nomes if c in self.memDiel["val"]]            # já com resultados (.mat)
-        projetos = {c: f for q, c in enumerate(R.nomes) if c not in carregados
-                    for f in [rc.procurar_diel(R, q)] if f}                     # projeto existe, falta ler
-        reutilizar = True
-        if carregados or projetos:
-            existentes = carregados + list(projetos)
+        q = R.nomes.index(caso)
+        if caso in self.memDiel["val"]:
+            existente, jaCarregado = self.memDiel["val"][caso].ficheiro, True
+        else:
+            existente, jaCarregado = rc.procurar_diel(R, q), False   # só projetos que chegaram ao fim
+        simular = True
+        if existente:
             r = QMessageBox.question(self, "Run CST Simulation",
-                "Já existem simulações do dielétrico real com as mesmas características para: "
-                f"{', '.join(c for c in R.nomes if c in existentes)}.\n\n"
-                "Usar essas e simular só os casos em falta (Sim) ou simular todos de novo (Não)?",
+                f'Já existe uma simulação do dielétrico real para "{caso}" com as mesmas características:\n'
+                f'{os.path.basename(existente)}\n\nUsar essa (Sim) ou simular de novo (Não)?',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            reutilizar = (r == QMessageBox.Yes)
-        jobs = []
-        for c in R.nomes:                                                      # pela ordem da app
-            if reutilizar and c in carregados:
-                continue
-            if reutilizar and c in projetos:
-                jobs.append((c, projetos[c], False))                           # só lê o campo distante
-            else:
-                jobs.append((c, "", True))                                     # cria e simula
-        if not jobs:                                                           # tudo já em memória
-            self._guardar_selecoes(); self.tabs.setCurrentIndex(3); self.renderizar()
+            simular = (r == QMessageBox.No)
+        if not simular and jaCarregado:
+            self._guardar_selecoes(); self.selDiag = caso
+            self.tabs.setCurrentIndex(3); self.renderizar()
             return
-        aSimular = [c for c, _, sim in jobs if sim]
-        if aSimular:
-            erMax = max(np.nanmax(R.res[R.nomes.index(c)].er) for c in aSimular)
+        if simular:
             r = QMessageBox.question(self, "Run CST Simulation",
-                f"Vou simular no CST a RIS com o dielétrico real ({int(R.p.M)}×{int(R.p.N)} células, εr até "
-                f"{erMax:.0f}) com o Frequency Domain solver, para {len(aSimular)} caso(s):\n"
-                f"{', '.join(aSimular)}.\n\nCada caso pode demorar bastante (εr alto -> malha fina). Continuar?",
+                f'Vou simular no CST a RIS com o dielétrico real ("{caso}", {int(R.p.M)}×{int(R.p.N)} células, '
+                f'εr até {np.nanmax(R.res[q].er):.0f}) com o {ris_cst.nome_solver_diel()}'
+                f'{" e simetria em y (metade do modelo)" if ris_cst._vba_simetria(R) else ""}.\n\n'
+                'Pode demorar bastante (εr alto -> muitas células). Continuar?',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if r != QMessageBox.Yes:
                 return
-        self._correr_cst(jobs, selecionar=False, modelo="diel")
+        self._correr_cst([(caso, "" if simular else existente, simular)], selecionar=True, modelo="diel")
 
-    def _correr_cst(self, jobs, selecionar, modelo="ibc"):
+    def _correr_cst(self, jobs, selecionar, modelo="diel"):
         dlg = QProgressDialog("A ligar ao CST...", None, 0, 0, self)
         dlg.setWindowTitle("CST" if modelo == "ibc" else "Run CST Simulation (dielétrico real)")
         dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(0)
@@ -579,33 +566,43 @@ class App(QMainWindow):
 
     # ---- Normalização (seletor nas tabs Diagrama e Mapa 2D)
     def _seletor_norm(self):
-        sw, gr = seletor(["Normalizado ao contínuo", "Original"], 0 if self.normalizar else 1)
-        sw.setToolTip("Original: teoria = |fator de rede|·cosθ em dB; CST = |E| em dB(V/m). "
-                      "As escalas ficam ancoradas no máximo do contínuo para os casos continuarem comparáveis.")
+        """Botão ON/OFF 'Normalizado' (ON: 0 dB = pico do contínuo; OFF: valores sem normalizar)."""
+        bt = QPushButton()
+        bt.setCheckable(True)
+        bt.setChecked(self.normalizar)
+        bt.setFixedWidth(52)
+        bt.setToolTip("ON: 0 dB = pico do contínuo.\nOFF: RCS em dB(mm²), na teoria (ótica física: "
+                      "4π·(a/λ)²·(|fator de rede|·cosθ)², a = Lx·Ly) e no CST (modo RCS do campo distante), "
+                      "no mesmo eixo. As escalas ficam ancoradas no máximo teórico do contínuo.")
 
-        def trocar(i):
-            if self.normalizar == (i == 0):
+        def aspeto(on):
+            bt.setText("ON" if on else "OFF")
+            bt.setStyleSheet("QPushButton { font-weight: bold; color: white; border-radius: 4px; padding: 3px; "
+                             f"background-color: {'#2e7d32' if on else '#9e9e9e'}; }}")
+        aspeto(self.normalizar)
+
+        def trocar(on):
+            aspeto(on)
+            if self.normalizar == on:
                 return
-            self.normalizar = (i == 0)
+            self.normalizar = on
             self._guardar_selecoes()
             atual = self.tabs.currentIndex()
             self._render_diagrama(self.R)
             self._render_mapa(self.R)
             self.tabs.setCurrentIndex(atual)
-        gr.idClicked.connect(trocar)
-        return sw
+        bt.toggled.connect(trocar)
+        return bt
 
     def _fontes_cst(self):
-        """(nome, memória, estilo, cor) de cada fonte CST."""
-        return [("CST (IBC)", self.memCST, "--", (0.80, 0.10, 0.10)),
-                ("CST (dielétrico)", self.memDiel, "-.", (0.10, 0.55, 0.20))]
+        """(nome, memória, estilo, cor) de cada fonte CST mostrada (só o dielétrico real; o IBC foi retirado
+        da interface — o código IBC continua em ris_cst.validar)."""
+        return [("CST (dielétrico)", self.memDiel, "-.", (0.10, 0.55, 0.20))]
 
     def _ref_cst(self, campo, val=None):
-        """Referência do CST (valores originais): contínuo se carregado, senão o maior dos casos carregados.
-        Sem 'val': referência comum às duas fontes (contínuo do IBC, senão do dielétrico), porque ambas
-        dão |E| em V/m com a mesma onda plana e por isso são diretamente comparáveis."""
+        """Referência do CST (valores sem normalizar): contínuo se carregado, senão o maior dos casos carregados."""
         cont = self.R.nomes[rc.I_CONT]
-        fontes = [val] if val is not None else [self.memCST["val"], self.memDiel["val"]]
+        fontes = [val] if val is not None else [self.memDiel["val"]]
         for vf in fontes:
             if cont in vf:
                 return float(getattr(vf[cont], campo).max())
@@ -622,30 +619,19 @@ class App(QMainWindow):
     def _render_diagrama(self, R):
         p = R.p
         w = QWidget(); V = QVBoxLayout(w); V.setContentsMargins(0, 0, 0, 0)
-        dd = QComboBox(); dd.addItems(R.nomes); dd.setCurrentText(self.casoSelCST); dd.setFixedWidth(110)
-        dd.currentTextChanged.connect(lambda t: setattr(self, "casoSelCST", t))
-        btV = QPushButton("Simular no CST"); btV.setStyleSheet("background-color: rgb(217,230,250); font-weight: bold;")
-        btV.clicked.connect(lambda: self.calcular("btValCST"))
-        btL = QPushButton("Carregar do CST")
-        btL.setToolTip("Lê os projetos CST já simulados (pasta Estudo_Er\\Validacao_CST) para estes parâmetros")
-        btL.clicked.connect(lambda: self.calcular("btCarregarCST"))
-        nomesCST = [n for n in R.nomes if n in self.memCST["val"]]
         nomesDiel = [n for n in R.nomes if n in self.memDiel["val"]]
-        if not nomesCST and not nomesDiel:
-            txt = ('Nenhum caso validado: "Simular no CST" (1-3 min por caso) ou "Carregar do CST" (projetos já '
-                   'simulados). Dielétrico real: "Run CST Simulation" + Calculate.')
+        if not nomesDiel:
+            txt = 'Sem resultados CST: "Run CST Simulation" (dielétrico real) com o caso escolhido + Calculate.'
         else:
-            txt = ((f"IBC (tracejado vermelho): {', '.join(nomesCST)}." if nomesCST else "") +
-                   (f"  Dielétrico (traço-ponto verde): {', '.join(nomesDiel)}." if nomesDiel else ""))
-        V.addWidget(barra(negrito("Validar no CST:"), dd, btV, btL, negrito("Escala:"), self._seletor_norm(),
-                          italico(txt)))
+            txt = f"CST dielétrico (traço-ponto verde): {', '.join(nomesDiel)}."
+        V.addWidget(barra(negrito("Normalizado:"), self._seletor_norm(), italico(txt)))
 
-        # Normalizado: 0 dB = pico do contínuo.  Original: |fator de rede|·cosθ em dB (off = 20·log10 do
-        # pico do contínuo) e CST em dB(V/m) num segundo eixo; os eixos ficam ancorados no contínuo.
+        # Normalizado: 0 dB = pico do contínuo.  Não normalizado: RCS em dB(mm²) — teoria (off = RCS do pico
+        # do contínuo) e CST no mesmo eixo; o eixo fica ancorado no contínuo teórico.
         norm = self.normalizar
-        off = 0.0 if norm else 20 * np.log10(R.refC)
-        unT = "dB" if norm else "dB (|FR|·cosθ)"
-        ylab = "Nível normalizado [dB]" if norm else "Teoria: |fator de rede|·cosθ [dB]"
+        off = 0.0 if norm else 20 * np.log10(R.refC) + R.cRCS
+        unT = "dB" if norm else "dB(mm²)"
+        ylab = "Nível normalizado [dB]" if norm else "RCS [dB(mm²)]"
 
         tg = QTabWidget()
         # todos os casos (só teoria)
@@ -658,13 +644,11 @@ class App(QMainWindow):
         if R.espNoCorte:
             xline(ax, R.az_s, ":", f"Especular {rc.g(R.az_s)}°", LARANJA_ESP)
         self._eixos_corte(ax, f"Corte em azimute (El = {rc.g(p.El_r)}°), "
-                              + ("normalizado ao contínuo" if norm else "valores originais (sem normalizar)"),
+                              + ("normalizado" if norm else "não normalizado"),
                           off, ylab)
         ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2, fontsize=9)
         tg.addTab(tw, "Todos os casos")
 
-        refCST = self._ref_cst("campo")
-        offC = 20 * np.log10(refCST)
         for q, r in enumerate(R.res):
             y = rc.dB(R.CUT[q], R.refC) + off; L = R.lob[q]
             pk = L.pico + off
@@ -684,7 +668,6 @@ class App(QMainWindow):
                 xline(ax, R.az_s, ":", f"Especular {rc.g(R.az_s)}°", LARANJA_ESP)
             txtCST = ""
             hs, ls_ = ax.get_legend_handles_labels()
-            ax2 = None
             for nomeF, memF, estF, corF in self._fontes_cst():
                 if r.nome not in memF["val"]:
                     continue
@@ -697,17 +680,12 @@ class App(QMainWindow):
                     txtCST += f"   |   {curto}: pico a {aC[ipC]:.1f}° · SLL {sllC:.1f} dB"
                     lab = f"{nomeF}: pico a {aC[ipC]:.1f}°, SLL {sllC:.1f} dB"
                 else:
-                    # CST original: |E| em dB(V/m) no eixo da direita (IBC e dielétrico com a mesma referência)
+                    # CST sem normalizar: RCS em dB(mm²), no mesmo eixo da teoria
                     yO = 20 * np.log10(v.campo + rc.EPS)
-                    if ax2 is None:
-                        ax2 = ax.twinx()
-                        ax2.set_ylim(offC - 40, offC + 3)
-                        ax2.set_ylabel("CST: |E| [dB(V/m)]", color=(0.80, 0.10, 0.10))
-                        ax2.tick_params(axis="y", colors=(0.80, 0.10, 0.10))
-                    h, = ax2.plot(aC, np.maximum(yO, offC - 40), estF, color=corF, lw=1.6)
-                    txtCST += f"   |   {curto}: {yO[ipC]:.1f} dB(V/m) a {aC[ipC]:.1f}°"
-                    lab = (f"{nomeF} |E| (eixo direito): pico {yO[ipC]:.1f} dB(V/m) a {aC[ipC]:.1f}° "
-                           f"({yO[ipC] - offC:+.2f} dB face à referência), SLL {sllC:.1f} dB")
+                    h, = ax.plot(aC, np.maximum(yO, off - 40), estF, color=corF, lw=1.6)
+                    txtCST += f"   |   {curto}: {yO[ipC]:.1f} dB(mm²) a {aC[ipC]:.1f}°"
+                    lab = (f"{nomeF}: pico {yO[ipC]:.1f} dB(mm²) a {aC[ipC]:.1f}° "
+                           f"({yO[ipC] - pk:+.1f} dB face à teoria), SLL {sllC:.1f} dB")
                 hs.append(h); ls_.append(lab)
             self._eixos_corte(ax, f"{r.nome} — lobo principal {pk:.1f} {unT} a {L.angPico:.1f}° · "
                                   f"SLL {L.sll:.1f} dB{txtCST}", off, ylab)
@@ -760,34 +738,29 @@ class App(QMainWindow):
 
     def _render_mapa(self, R):
         p = R.p
-        fontes = self._fontes_cst()                          # [(nome, memória, estilo, cor)] IBC, dielétrico
+        fontes = self._fontes_cst()                          # [(nome, memória, estilo, cor)]: dielétrico
         w = QWidget(); V = QVBoxLayout(w); V.setContentsMargins(0, 0, 0, 0)
-        sw, gr = seletor(["App (teoria)", "CST (IBC)", "CST (dielétrico)"], self.fonteMapa)
-        btL = QPushButton("Carregar do CST")
-        btL.setToolTip("Lê os projetos CST (IBC) já simulados (pasta Estudo_Er\\Validacao_CST) para estes parâmetros")
-        btL.clicked.connect(lambda: self.calcular("btCarregarCST"))
-        disp = [f"{nomeF.replace('CST ', '')}: {', '.join(n for n in R.nomes if n in memF['val'])}"
+        sw, gr = seletor(["App (teoria)"] + [f[0] for f in fontes], self.fonteMapa)
+        disp = [f"{nomeF}: {', '.join(n for n in R.nomes if n in memF['val'])}"
                 for nomeF, memF, _, _ in fontes if any(n in memF["val"] for n in R.nomes)]
-        txtM = ("CST disponível — " + "; ".join(disp) + "." if disp else
-                'Sem resultados CST: "Carregar do CST" / "Simular no CST" (IBC) ou "Run CST Simulation" (dielétrico).')
-        V.addWidget(barra(negrito("Mostrar:"), sw, btL, negrito("Escala:"), self._seletor_norm(), italico(txtM)))
+        txtM = ("Disponível — " + "; ".join(disp) + "." if disp else
+                'Sem resultados CST: "Run CST Simulation" (dielétrico real) com o caso escolhido + Calculate.')
+        V.addWidget(barra(negrito("Mostrar:"), sw, negrito("Normalizado:"), self._seletor_norm(), italico(txtM)))
 
         AZ, EL = np.meshgrid(R.azg, R.elg)
         nomeCont = R.nomes[rc.I_CONT]
         norm = self.normalizar
-        # Original: teoria = |fator de rede|·cosθ em dB; CST = |E| em dB(V/m) com a referência comum às duas
-        # fontes CST; escala de cores = 40 dB abaixo do máximo do contínuo
-        offT = 0.0 if norm else 20 * np.log10(R.ref2)
-        offMC = 20 * np.log10(self._ref_cst("mapCampo"))
-        offCC = 20 * np.log10(self._ref_cst("campo"))
-        rotT = "Nível normalizado [dB]" if norm else "|fator de rede|·cosθ [dB]"
-        rotC = "Nível normalizado [dB]" if norm else "|E| [dB(V/m)]"
-        unT = "dB" if norm else "dB (|FR|·cosθ)"
+        # Não normalizado: RCS em dB(mm²) na teoria e no CST, com a mesma escala de cores
+        # (do máximo teórico do contínuo até 40 dB abaixo)
+        offT = 0.0 if norm else 20 * np.log10(R.ref2) + R.cRCS
+        rotT = "Nível normalizado [dB]" if norm else "RCS [dB(mm²)]"
+        rotC = rotT
+        unT = "dB" if norm else "dB(mm²)"
 
         def txt_norm(val):
             if not norm:
-                return "|E| original"
-            return "normalizado ao contínuo do mesmo modelo" if nomeCont in val else "normalizado ao próprio pico"
+                return "não normalizado"
+            return "normalizado" if nomeCont in val else "normalizado ao próprio pico"
 
         tg = QTabWidget()
         pilhas = []
@@ -802,13 +775,12 @@ class App(QMainWindow):
             ax.set_title(f"App — {r.nome}: lobo principal {L.pico + offT:.1f} {unT} a {L.angPico:.1f}° · "
                          f"SLL {L.sll:.1f} dB", fontsize=10)
             st.addWidget(tw)
-            # CST (IBC) e CST (dielétrico)
+            # CST (dielétrico)
             for nomeF, memF, _, _ in fontes:
                 val = memF["val"]
                 if r.nome not in val:
-                    como = ('"Carregar do CST" ou "Simular no CST" (tab Diagrama de radiação)' if "IBC" in nomeF
-                            else '"Run CST Simulation" com este caso escolhido + Calculate')
-                    lb = italico(f'Sem resultados {nomeF} para "{r.nome}" com estes parâmetros.\nUsa {como}.')
+                    lb = italico(f'Sem resultados {nomeF} para "{r.nome}" com estes parâmetros.\n'
+                                 'Usa "Run CST Simulation" com este caso escolhido + Calculate.')
                     lb.setAlignment(Qt.AlignCenter)
                     st.addWidget(lb)
                     continue
@@ -817,7 +789,7 @@ class App(QMainWindow):
                     ref = float(val[nomeCont].mapCampo.max()) if nomeCont in val else float(v.mapCampo.max())
                     ZC = np.maximum(20 * np.log10(v.mapCampo / ref + rc.EPS), -40); oC = 0.0; un = "dB"
                 else:
-                    ZC = np.maximum(20 * np.log10(v.mapCampo + rc.EPS), offMC - 40); oC = offMC; un = "dB(V/m)"
+                    ZC = np.maximum(20 * np.log10(v.mapCampo + rc.EPS), offT - 40); oC = offT; un = "dB(mm²)"
                 tw, fig = figura(); ax = fig.add_subplot()
                 self._imagem(fig, ax, v.mapAz, v.mapEl, ZC, oC, rotC)
                 AZm, ELm = np.meshgrid(v.mapAz, v.mapEl)
@@ -830,12 +802,12 @@ class App(QMainWindow):
             pilhas.append(st)
             tg.addTab(st, r.nome)
 
-        # Casos x Azimute (corte em El = El_r): teoria, CST (IBC) e CST (dielétrico)
+        # Casos x Azimute (corte em El = El_r): teoria e CST (dielétrico)
         iel = int(np.argmin(np.abs(R.elg - p.El_r)))
         nR = len(R.res)
         refRow = R.MAP[rc.I_CONT][iel, :].max()
-        offR = 0.0 if norm else 20 * np.log10(refRow)
-        txtApp = "normalizado ao contínuo" if norm else "|fator de rede|·cosθ original"
+        offR = 0.0 if norm else 20 * np.log10(refRow) + R.cRCS
+        txtApp = "normalizado" if norm else "não normalizado"
         paineis = [(np.array([rc.dB(R.MAP[q][iel, :], refRow) + offR for q in range(nR)]),
                     f"App — nível por caso (corte El = {rc.g(p.El_r)}°), {txtApp}", offR, rotT)]
         for nomeF, memF, _, _ in fontes:
@@ -848,9 +820,9 @@ class App(QMainWindow):
                         rC = float(val[nomeCont].campo.max()) if nomeCont in val else v.campo.max()
                         ZZ[q] = np.interp(R.azg, v.ang, np.maximum(20 * np.log10(v.campo / rC + rc.EPS), -40))
                     else:
-                        ZZ[q] = np.interp(R.azg, v.ang, np.maximum(20 * np.log10(v.campo + rc.EPS), offCC - 40))
+                        ZZ[q] = np.interp(R.azg, v.ang, np.maximum(20 * np.log10(v.campo + rc.EPS), offR - 40))
             paineis.append((ZZ, f"{nomeF} — nível por caso (corte El = {rc.g(p.El_r)}°), {txt_norm(val)} "
-                                "(linhas vazias = sem resultados)", 0.0 if norm else offCC, rotC))
+                                "(linhas vazias = sem resultados)", offR, rotC))
         st = QStackedWidget()
         for Zx, ttl, oX, rot in paineis:
             tw, fig = figura(); ax = fig.add_subplot()

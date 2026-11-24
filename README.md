@@ -40,7 +40,7 @@ O cálculo também pode ser usado sem interface:
 
 ```python
 import ris_core as rc
-R = rc.calcular(rc.Params(M=10, N=10, Px=0.025, Py=0.025, Freq=3.9, h_mm=1.524, Az_r=30))
+R = rc.calcular(rc.Params(M=10, N=10, Px=0.03843, Py=0.03843, Freq=3.9, h_mm=1.524, Az_r=30))
 print(R.res[2].er)      # matriz de εr do caso de 2 bits
 ```
 

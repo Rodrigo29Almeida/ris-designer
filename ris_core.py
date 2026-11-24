@@ -80,8 +80,8 @@ def dBr(x, ref):
 class Params:
     M: int = 10                 # linhas (y)
     N: int = 10                 # colunas (x)
-    Px: float = 0.025           # período em x [m]
-    Py: float = 0.025           # período em y [m]
+    Px: float = 0.03843         # período em x [m] (λ/2 a 3,9 GHz)
+    Py: float = 0.03843         # período em y [m] (λ/2 a 3,9 GHz)
     Freq: float = 3.9           # [GHz]
     h_mm: float = 1.524         # espessura do dielétrico [mm]
     Az_i: float = 0.0
@@ -212,6 +212,7 @@ class Resultado:
     el_s: float
     espNoCorte: bool
     log: list = field(default_factory=list)
+    cRCS: float = 0.0           # RCS [dB(mm²)] = 20·log10(|FR|·cosθ) + cRCS (ver rcs_const)
 
     @property
     def nomes(self):
@@ -342,8 +343,22 @@ def calcular(p: Params, pasta_phase: str = PASTA_PHASE) -> Resultado:
     wi = np.sqrt(max(1 - ui ** 2 - vi ** 2, 0))
     kP = -np.array([ui, vi, wi])
 
+    cR = rcs_const(p.Px, p.Py, lam)
+    pr(f"» RCS (teoria, ótica física): pico do contínuo = {20*np.log10(ref2) + cR:.1f} dB(mm²) "
+       f"(placa {g(N*p.Px*1e3)} × {g(M*p.Py*1e3)} mm em incidência normal: "
+       f"{10*np.log10(4*np.pi*(N*p.Px*M*p.Py/lam)**2*1e6):.1f} dB(mm²))")
     return Resultado(p, cv, lam, k, ui, vi, ur, vr, II, JJ, PH, passoX, passoY, res, angF, CUT, refC,
-                     lob, azg, elg, MAP, ref2, ZsCasos, kP, dRef, az_s, el_s, espNoCorte, log)
+                     lob, azg, elg, MAP, ref2, ZsCasos, kP, dRef, az_s, el_s, espNoCorte, log, cR)
+
+
+def rcs_const(Px: float, Py: float, lam: float) -> float:
+    """Constante da RCS teórica [dB(mm²)].
+    Ótica física: cada célula (área a = Px·Py) com coeficiente de reflexão Γ = A·e^{jφ} espalha, a 1 m,
+    E = (a/λ)·Γ·cosθ·Eᵢ; somando as células, |E|/|Eᵢ| = (a/λ)·|FR|·cosθ e
+        σ = 4π·r²·|E|²/|Eᵢ|² = 4π·(a/λ)²·(|FR|·cosθ)²   [m²].
+    Em dB(mm²): σ = 20·log10(|FR|·cosθ) + 10·log10(4π·(a/λ)²·10⁶).
+    (Placa uniforme em incidência normal: |FR| = M·N -> σ = 4π·A²/λ², a RCS especular clássica.)"""
+    return float(10 * np.log10(4 * np.pi * (Px * Py / lam) ** 2 * 1e6))
 
 
 # ----------------------------------------------------------------------------- CST: assinatura e ficheiros
@@ -369,8 +384,13 @@ def padrao_val(p: Params, nome: str, com_tamanho: bool = True, prefixo: str = PR
     return f"{prefixo}{tag_de(nome)}_{int(p.M)}x{int(p.N)}{cel}_{fTag}GHz_h{hTag}_Az{g(p.Az_r)}_El{g(p.El_r)}_"
 
 
+GRANDEZA_MAT = "RCS_m2"   # grandeza dos .mat atuais (campo/mapCampo = RCS linear em m²); sem ela = |E| antigo
+
+
 @dataclass
 class ValCST:
+    """Resultado CST em memória. campo/mapCampo = √(RCS em mm²), ou seja 20·log10(campo) = RCS [dB(mm²)]
+    (assim as razões entre valores continuam a ser razões de campo, como na teoria)."""
     caso: str
     ang: np.ndarray
     campo: np.ndarray
@@ -394,11 +414,35 @@ def ler_mats(assin: str, nomes, pasta: str = PASTA_VAL, prefixo: str = PREF_IBC)
             r = sio.loadmat(fm, squeeze_me=True, struct_as_record=False)["reg"]
             if str(r.assinatura) != assin or str(r.caso) not in nomes:
                 continue
+            if str(getattr(r, "grandeza", "")) != GRANDEZA_MAT:
+                continue                                  # .mat antigo (|E| em V/m): é preciso ler de novo
+            amp = lambda x: np.sqrt(np.maximum(x, 0) * 1e6)          # RCS m² -> √(mm²)
             out[str(r.caso)] = ValCST(str(r.caso), np.atleast_1d(r.ang).astype(float),
-                                      np.atleast_1d(r.campo).astype(float),
+                                      amp(np.atleast_1d(r.campo).astype(float)),
                                       np.atleast_1d(r.mapAz).astype(float), np.atleast_1d(r.mapEl).astype(float),
-                                      np.atleast_2d(r.mapCampo).astype(float), float(r.tempo), str(r.ficheiro),
+                                      amp(np.atleast_2d(r.mapCampo).astype(float)), float(r.tempo), str(r.ficheiro),
                                       bool(r.legado))
+        except Exception:
+            pass
+    return out
+
+
+def mats_antigos(assin: str, nomes, pasta: str = PASTA_VAL, prefixo: str = PREF_DIEL) -> dict:
+    """Casos com .mat antigo (|E|, sem RCS) cujo projeto .cst ainda tem resultados -> {caso: ficheiro .cst}.
+    Servem para voltar a ler esses projetos em RCS."""
+    import scipy.io as sio
+    out = {}
+    if not os.path.isdir(pasta):
+        return out
+    for fm in sorted(glob.glob(os.path.join(pasta, prefixo + "*.mat")), key=os.path.getmtime):
+        try:
+            r = sio.loadmat(fm, squeeze_me=True, struct_as_record=False)["reg"]
+            if (str(r.assinatura) != assin or str(r.caso) not in nomes
+                    or str(getattr(r, "grandeza", "")) == GRANDEZA_MAT):
+                continue
+            fc = os.path.splitext(fm)[0] + ".cst"
+            if os.path.isfile(fc) and tem_resultados(fc):
+                out[str(r.caso)] = fc
         except Exception:
             pass
     return out
@@ -421,14 +465,30 @@ def tempos_historicos(M: int, N: int, prefixo: str = PREF_IBC, pasta: str = None
 
 
 def gravar_mat(v: ValCST, assin: str):
-    """Grava <projeto>.mat ao lado do .cst, no mesmo formato da app MATLAB (struct 'reg')."""
+    """Grava <projeto>.mat ao lado do .cst (struct 'reg'); campo e mapCampo = RCS linear em m².
+    Se já existir um .mat antigo (|E|), não é apagado: passa a <projeto>_Efield.mat, e o tempo da simulação
+    original é mantido (uma releitura não conta como simulação)."""
     import scipy.io as sio
+    fm = os.path.splitext(v.ficheiro)[0] + ".mat"
+    tempo, legado = float(v.tempo), bool(v.legado)
+    if os.path.isfile(fm):
+        try:
+            r = sio.loadmat(fm, squeeze_me=True, struct_as_record=False)["reg"]
+            if str(getattr(r, "grandeza", "")) != GRANDEZA_MAT:
+                if legado and not bool(r.legado):
+                    tempo, legado = float(r.tempo), False
+                bak = os.path.splitext(fm)[0] + "_Efield.mat"
+                if not os.path.exists(bak):
+                    os.replace(fm, bak)
+        except Exception:
+            pass
+    sig = lambda x: np.asarray(x, float) ** 2 / 1e6                # √(mm²) -> m²
     reg = {"caso": v.caso, "ang": np.asarray(v.ang, float).reshape(1, -1),
-           "campo": np.asarray(v.campo, float).reshape(1, -1),
+           "campo": sig(v.campo).reshape(1, -1),
            "mapAz": np.asarray(v.mapAz, float).reshape(1, -1), "mapEl": np.asarray(v.mapEl, float).reshape(1, -1),
-           "mapCampo": np.asarray(v.mapCampo, float), "tempo": float(v.tempo), "ficheiro": v.ficheiro,
-           "legado": bool(v.legado), "assinatura": assin}
-    sio.savemat(os.path.splitext(v.ficheiro)[0] + ".mat", {"reg": reg})
+           "mapCampo": sig(v.mapCampo), "tempo": tempo, "ficheiro": v.ficheiro,
+           "legado": legado, "assinatura": assin, "grandeza": GRANDEZA_MAT}
+    sio.savemat(fm, {"reg": reg})
 
 
 def projeto_compativel(fich_cst: str, R: Resultado, q: int, tol_deg: float = 0.5) -> bool:
@@ -484,12 +544,19 @@ def procurar_projetos(R: Resultado, ja: dict, pasta: str = PASTA_VAL):
         if not fc:
             continue
         fc.sort(key=os.path.getmtime, reverse=True)
-        escolhido = next((f for f in fc if projeto_compativel(f, R, q)), None)
+        escolhido = next((f for f in fc if tem_resultados(f) and projeto_compativel(f, R, q)), None)
         if escolhido is None:
             sem.append(nome)
         else:
             jobs.append((nome, escolhido))
     return jobs, sem
+
+
+def tem_resultados(fich_cst: str) -> bool:
+    """O projeto chegou ao fim da simulação? (tem o campo distante da onda plana em Result\\).
+    Projetos interrompidos (solver parado, app fechada) não têm e não devem ser reaproveitados."""
+    base = os.path.splitext(fich_cst)[0]
+    return bool(glob.glob(os.path.join(glob.escape(base), "Result", "farfield*_pw.ffm")))
 
 
 def _texto_historico(fich_cst: str):
@@ -549,7 +616,7 @@ def procurar_diel(R: Resultado, q: int, pasta: str = PASTA_VAL):
     """Projeto 'ValDiel_*' (dielétrico real, simulado) compatível com o caso q (o mais recente), ou None."""
     fc = glob.glob(os.path.join(pasta, padrao_val(R.p, R.nomes[q], True, PREF_DIEL) + "*.cst"))
     fc.sort(key=os.path.getmtime, reverse=True)
-    return next((f for f in fc if array_compativel(f, R, q, com_onda=True)), None)
+    return next((f for f in fc if tem_resultados(f) and array_compativel(f, R, q, com_onda=True)), None)
 
 
 def pontos_farfield(El_r: float):
