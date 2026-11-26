@@ -441,7 +441,7 @@ def mats_antigos(assin: str, nomes, pasta: str = PASTA_VAL, prefixo: str = PREF_
                     or str(getattr(r, "grandeza", "")) == GRANDEZA_MAT):
                 continue
             fc = os.path.splitext(fm)[0] + ".cst"
-            if os.path.isfile(fc) and tem_resultados(fc):
+            if os.path.isfile(fc) and tem_resultados(fc) and solver_final(fc) == "HF Frequency Domain":
                 out[str(r.caso)] = fc
         except Exception:
             pass
@@ -612,11 +612,23 @@ def procurar_array(R: Resultado, q: int = CASO_CST, pasta: str = PASTA_ESTUDO_ER
     return next((f for f in fc if array_compativel(f, R, q)), None)
 
 
-def procurar_diel(R: Resultado, q: int, pasta: str = PASTA_VAL):
-    """Projeto 'ValDiel_*' (dielétrico real, simulado) compatível com o caso q (o mais recente), ou None."""
+def solver_final(fich_cst: str):
+    """Último ChangeSolverType do histórico do projeto (ex.: 'HF Frequency Domain'), ou None."""
+    try:
+        s = re.findall(r'ChangeSolverType "([^"]+)"', _texto_historico(fich_cst) or "")
+        return s[-1] if s else None
+    except Exception:
+        return None
+
+
+def procurar_diel(R: Resultado, q: int, pasta: str = PASTA_VAL, solver: str = "HF Frequency Domain"):
+    """Projeto 'ValDiel_*' (dielétrico real, simulado) compatível com o caso q (o mais recente), ou None.
+    solver: só aceita projetos cujo último solver no histórico seja este (um projeto alterado à mão para
+    outro solver, ex. TD, tem em Result\\ os resultados desse solver). None = qualquer."""
     fc = glob.glob(os.path.join(pasta, padrao_val(R.p, R.nomes[q], True, PREF_DIEL) + "*.cst"))
     fc.sort(key=os.path.getmtime, reverse=True)
-    return next((f for f in fc if tem_resultados(f) and array_compativel(f, R, q, com_onda=True)), None)
+    return next((f for f in fc if tem_resultados(f) and array_compativel(f, R, q, com_onda=True)
+                 and (solver is None or solver_final(f) == solver)), None)
 
 
 def pontos_farfield(El_r: float):

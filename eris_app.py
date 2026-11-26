@@ -354,7 +354,10 @@ class App(QMainWindow):
         if caso in self.memDiel["val"]:
             existente, jaCarregado = self.memDiel["val"][caso].ficheiro, True
         else:
-            existente, jaCarregado = rc.procurar_diel(R, q), False   # só projetos que chegaram ao fim
+            # só projetos que chegaram ao fim e cujo último solver é o que a app usa (FD/TD/IE)
+            solver = {"FD": "HF Frequency Domain", "TD": "HF Time Domain",
+                      "IE": "HF IntegralEq"}.get(ris_cst.DIEL_SOLVER)
+            existente, jaCarregado = rc.procurar_diel(R, q, solver=solver), False
         simular = True
         if existente:
             r = QMessageBox.question(self, "Run CST Simulation",

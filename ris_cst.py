@@ -214,7 +214,8 @@ TD_STEADY_STATE = "-30"         # critério de paragem pela energia [dB] (CST po
 # Plano de simetria em y (magnético) quando a RIS e a onda plana são simétricas em y (incidência e reflexão
 # com El = 0 e Az_i = 0: todas as linhas iguais, E segundo x). Simula metade -> ~metade da memória e do tempo,
 # sem perder precisão. As fronteiras "expanded open" não mudam.
-DIEL_SIMETRIA = True            # True: metade do modelo (Ysymmetry magnetic, plano a meio em y)
+DIEL_SIMETRIA = True            # True: metade do modelo (Ysymmetry magnetic, plano y = 0; a RIS é criada
+                                # centrada em y = 0 em _criar_geometria_diel). Teste Contínuo 10x10: 48 s, 10,7 GB
 FD_PASSOS_POR_LAMBDA = 10       # passos por comprimento de onda (no material) da malha tetraédrica
 FD_ORDEM = "Second"             # "Second" (mais preciso) ou "First" (3-4x menos memória, menos preciso)
 FD_PRECISAO = None              # critério do solver iterativo; None = por defeito do CST (1e-4); ex.: "1e-3"
@@ -362,15 +363,19 @@ def _criar_geometria_diel(mws, R: rc.Resultado, q: int):
                 f'.Mu "1.0"\n.TanD "{rc.g(rc.TAND)}"\n.TanDFreq "{rc.g(p.Freq)}"\n.TanDGiven "True"\n'
                 f'.TanDModel "ConstTanD"\n.Colour "{0.2+0.6*a:.3f}", "0.500", "{0.9-0.6*a:.3f}"\n.Create\nEnd With\n')
     _H(mws, "define dielectric materials (er)", vba)
+    # RIS centrada em y = 0: o plano de simetria do CST (Ysymmetry) está sempre em y = 0. Com a placa de
+    # 0 a M·Py, a simetria espelhava-a e o CST simulava 2M linhas. Mover a placa não altera a RCS.
+    y0 = -M * PyMM / 2
     vba = ""
     for i in range(1, M + 1):
         for j in range(1, N + 1):
             im = int(np.flatnonzero(erU == np.round(er_mat[i-1, j-1], 3))[0]) + 1
             vba += (f'With Brick\n.Reset\n.Name "cel_{i}_{j}"\n.Component "RIS"\n.Material "er_{im}"\n'
-                    f'.Xrange "{(j-1)*PxMM:.4f}", "{j*PxMM:.4f}"\n.Yrange "{(i-1)*PyMM:.4f}", "{i*PyMM:.4f}"\n'
+                    f'.Xrange "{(j-1)*PxMM:.4f}", "{j*PxMM:.4f}"\n'
+                    f'.Yrange "{y0+(i-1)*PyMM:.4f}", "{y0+i*PyMM:.4f}"\n'
                     f'.Zrange "0", "{rc.g(p.h_mm)}"\n.Create\nEnd With\n')
     vba += (f'With Brick\n.Reset\n.Name "GND"\n.Component "RIS"\n.Material "PEC"\n.Xrange "0", "{N*PxMM:.4f}"\n'
-            f'.Yrange "0", "{M*PyMM:.4f}"\n.Zrange "{rc.g(-rc.TGND_MM)}", "0"\n.Create\nEnd With\n')
+            f'.Yrange "{y0:.4f}", "{-y0:.4f}"\n.Zrange "{rc.g(-rc.TGND_MM)}", "0"\n.Create\nEnd With\n')
     _H(mws, "define cells (dielectric)", vba)
 
 
